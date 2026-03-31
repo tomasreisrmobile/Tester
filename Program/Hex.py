@@ -18,7 +18,6 @@ KB_DIR     = os.path.normpath(os.path.join(SCRIPT_DIR, '..', 'Keyboards'))
 DB_PATH    = os.path.join(SCRIPT_DIR, 'Database.txt')
 IMG_EXTS   = {'.jpg', '.jpeg', '.png', '.bmp'}
 
-# VK hex -> label
 VK_LABELS = {
     '1B':'ESC',
     '70':'F1','71':'F2','72':'F3','73':'F4',
@@ -68,6 +67,11 @@ BLUE   = '#42a5f5'
 AMBER  = '#ffa726'
 ACC_G  = '#1e5c28'
 ACC_B  = '#1a3f5c'
+
+DD_BG = '#3a3f46'
+DD_ACTIVE = '#4f6f8f'
+
+WINDOW_BOTTOM_MARGIN = 70
 
 def scan_keyboards():
     result = {}
@@ -126,24 +130,27 @@ def load_order_kb_map(path):
                 mapping[order_type] = tester_type
     return mapping
 
-# ── stav ──────────────────────────────────────────────────────────────────
-keyboards  = scan_keyboards()
-order_kb_map = load_order_kb_map(DB_PATH)
-sequence   = []
-idx        = [0]
-running    = [False]
-last_ok    = [None]
-photo_ref  = [None]
-led_state  = {'NUM': False, 'CAPS': False, 'SCROLL': False, 'PAD': False}
-led_values = {'NUM': '', 'CAPS': '', 'SCROLL': '', 'PAD': ''}
-pyn_listener = [None]
+keyboards        = scan_keyboards()
+order_kb_map     = load_order_kb_map(DB_PATH)
+sequence         = []
+idx              = [0]
+running          = [False]
+last_ok          = [None]
+photo_ref        = [None]
+led_state        = {'NUM': False, 'CAPS': False, 'SCROLL': False, 'PAD': False}
+led_values       = {'NUM': '', 'CAPS': '', 'SCROLL': '', 'PAD': ''}
+pyn_listener     = [None]
+resize_job       = [None]
 
-# ══ ROOT ══════════════════════════════════════════════════════════════════
 root = tk.Tk()
 root.title('Keyboard Tester')
 root.configure(bg=BG)
 root.minsize(720, 540)
-root.geometry('960x620')
+
+sw = root.winfo_screenwidth()
+sh = root.winfo_screenheight()
+root.geometry(f"{sw}x{sh-WINDOW_BOTTOM_MARGIN}+0+0")
+# root.overrideredirect(True)
 
 F_HEX = tkfont.Font(family='Courier New', size=30, weight='bold')
 F_BIG = tkfont.Font(family='Courier New', size=11)
@@ -151,23 +158,21 @@ F_MED = tkfont.Font(family='Courier New', size=9)
 F_SML = tkfont.Font(family='Courier New', size=8)
 F_RES = tkfont.Font(family='Courier New', size=9, weight='bold')
 
-kb_var   = tk.StringVar(value='')
-kb_names = sorted(keyboards.keys())
+kb_var            = tk.StringVar(value='')
+kb_names          = sorted(keyboards.keys())
 order_kb_type_var = tk.StringVar(value='')
-order_var = tk.StringVar(value='')
-date_var = tk.StringVar(value=datetime.now().strftime('%d.%m.%Y'))
+order_var         = tk.StringVar(value='')
+date_var          = tk.StringVar(value=datetime.now().strftime('%d.%m.%Y'))
 
 root.columnconfigure(0, weight=1)
 root.columnconfigure(1, weight=0)
 root.rowconfigure(0, weight=1)
 
-# ══ ĽAVÝ STĹPEC ═══════════════════════════════════════════════════════════
 left = tk.Frame(root, bg=BG)
 left.grid(row=0, column=0, sticky='nsew')
 left.columnconfigure(0, weight=1)
 left.rowconfigure(1, weight=1)
 
-# ── LED bar ───────────────────────────────────────────────────────────────
 led_bar = tk.Frame(left, bg=BG2, pady=8, padx=16)
 led_bar.grid(row=0, column=0, sticky='ew')
 
@@ -185,11 +190,9 @@ for nm in ['NUM', 'CAPS', 'SCROLL', 'PAD']:
     lbl = tk.Label(cell, text=nm, bg=BG2, fg=TSEC, font=F_SML)
     lbl.pack(pady=2)
     led_lbls[nm] = lbl
-    val_frame = tk.Frame(cell, bg=BG3,
-                         highlightthickness=1, highlightbackground=BORDER)
+    val_frame = tk.Frame(cell, bg=BG3, highlightthickness=1, highlightbackground=BORDER)
     val_frame.pack(fill='x', pady=2)
-    val_lbl = tk.Label(val_frame, text='—', bg=BG3, fg=TDIM,
-                       font=F_SML, width=6, anchor='center', pady=2)
+    val_lbl = tk.Label(val_frame, text='—', bg=BG3, fg=TDIM, font=F_SML, width=6, anchor='center', pady=2)
     val_lbl.pack()
     led_val_lbls[nm] = val_lbl
 
@@ -208,7 +211,6 @@ def set_led(name, on, value=None):
         led_lbls[name].config(fg=TSEC)
         led_val_lbls[name].config(text='—', fg=TDIM)
 
-# ── Fotka ─────────────────────────────────────────────────────────────────
 img_canvas = tk.Canvas(left, bg=BG, highlightthickness=0)
 img_canvas.grid(row=1, column=0, sticky='nsew')
 
@@ -223,45 +225,46 @@ def render_image(path=None):
         no_img.place(relx=0.5, rely=0.5, anchor='center')
         return
     try:
-        root.update_idletasks()
         cw = img_canvas.winfo_width()
         ch = img_canvas.winfo_height()
-        if cw < 10: cw = 500
-        if ch < 10: ch = 300
-        img   = Image.open(path)
+        if cw < 10:
+            cw = 500
+        if ch < 10:
+            ch = 300
+        img = Image.open(path)
         ratio = min(cw / img.width, ch / img.height)
-        nw    = int(img.width  * ratio)
-        nh    = int(img.height * ratio)
-        img   = img.resize((nw, nh), Image.LANCZOS)
+        nw = max(1, int(img.width * ratio))
+        nh = max(1, int(img.height * ratio))
+        img = img.resize((nw, nh), Image.LANCZOS)
         photo = ImageTk.PhotoImage(img)
         photo_ref[0] = photo
-        img_canvas.create_image(cw//2, ch//2, anchor='center', image=photo)
-        img_canvas.create_text(cw-6, ch-4, anchor='se',
-            text=os.path.basename(path), fill='#8a8a8a', font=F_SML)
+        img_canvas.create_image(cw // 2, ch // 2, anchor='center', image=photo)
+        img_canvas.create_text(cw - 6, ch - 4, anchor='se',
+                               text=os.path.basename(path), fill='#8a8a8a', font=F_SML)
     except Exception as e:
         img_canvas.create_text(10, 10, anchor='nw', text=str(e), fill=RED, font=F_SML)
 
-img_canvas.bind('<Configure>',
-    lambda e: render_image(keyboards.get(kb_var.get(), {}).get('img')))
+def on_img_resize(event=None):
+    if resize_job[0] is not None:
+        root.after_cancel(resize_job[0])
+    resize_job[0] = root.after(120, lambda: render_image(keyboards.get(kb_var.get(), {}).get('img')))
 
-# ── Hex panely ────────────────────────────────────────────────────────────
+img_canvas.bind('<Configure>', on_img_resize)
+
 bot = tk.Frame(left, bg=BG)
 bot.grid(row=2, column=0, sticky='ew')
 bot.columnconfigure(0, weight=1)
 bot.columnconfigure(1, weight=1)
 
 def make_hex_panel(parent, col, title, accent):
-    f = tk.Frame(parent, bg=BG2,
-                 highlightthickness=1, highlightbackground=BORDER)
-    f.grid(row=0, column=col, sticky='nsew',
-           padx=(0,4) if col==0 else (4,0), pady=8)
+    f = tk.Frame(parent, bg=BG2, highlightthickness=1, highlightbackground=BORDER)
+    f.grid(row=0, column=col, sticky='nsew', padx=(0,4) if col==0 else (4,0), pady=8)
     f.columnconfigure(0, weight=1)
     tk.Frame(f, bg=accent, height=3).pack(fill='x')
     hdr = tk.Frame(f, bg=BG2)
     hdr.pack(fill='x', padx=10, pady=6)
     hdr.columnconfigure(0, weight=1)
-    tk.Label(hdr, text=title, bg=BG2, fg=TSEC,
-             font=F_SML, anchor='w').grid(row=0, column=0, sticky='w')
+    tk.Label(hdr, text=title, bg=BG2, fg=TSEC, font=F_SML, anchor='w').grid(row=0, column=0, sticky='w')
     ord_l = tk.Label(hdr, text='', bg=BG2, fg=TDIM, font=F_SML, anchor='e')
     ord_l.grid(row=0, column=1, sticky='e')
     hex_l = tk.Label(f, text='—', bg=BG2, fg=TDIM, font=F_MED, anchor='center', pady=4)
@@ -270,79 +273,80 @@ def make_hex_panel(parent, col, title, accent):
     name_l.pack(fill='x', padx=10)
     return ord_l, hex_l, name_l
 
-ordA, hexA, nameA = make_hex_panel(bot, 0, 'STLACENE',    ACC_G)
+ordA, hexA, nameA = make_hex_panel(bot, 0, 'STLACENE', ACC_G)
 ordB, hexB, nameB = make_hex_panel(bot, 1, 'NASLEDUJUCE', ACC_B)
 
-result_lbl = tk.Label(left, text='', bg=BG, fg=TSEC,
-                      font=F_RES, anchor='center', pady=4)
+result_lbl = tk.Label(left, text='', bg=BG, fg=TSEC, font=F_RES, anchor='center', pady=4)
 result_lbl.grid(row=3, column=0, sticky='ew')
 
-# ══ PRAVÝ SIDEBAR ══════════════════════════════════════════════════════════
 sidebar = tk.Frame(root, bg=BG2, width=230)
 sidebar.grid(row=0, column=1, sticky='nsew')
 sidebar.columnconfigure(0, weight=1)
 sidebar.rowconfigure(11, weight=1)
 sidebar.propagate(False)
 
-# 1. Typ klavesnice
-tk.Label(sidebar, text='Typ klavesnice', bg=BG2,
-         fg=TSEC, font=F_SML, anchor='w',
+tk.Label(sidebar, text='Typ klavesnice', bg=BG2, fg=TSEC, font=F_SML, anchor='w',
          padx=14, pady=10).grid(row=0, column=0, sticky='ew')
 
-dd_wrap = tk.Frame(sidebar, bg=BG3,
-                   highlightthickness=1, highlightbackground=BORDER)
-dd_wrap.grid(row=1, column=0, sticky='ew', padx=14)
+dd_wrap = tk.Frame(sidebar, bg=BG3, highlightthickness=1, highlightbackground=BORDER)
+dd_wrap.grid(row=1, column=0, sticky='ew', padx=14, pady=(0, 8))
 dd_wrap.columnconfigure(0, weight=1)
 
 dropdown = tk.OptionMenu(dd_wrap, kb_var, *(kb_names if kb_names else ['']))
-dropdown.config(bg=BG3, fg=TPRI, relief='flat', font=F_BIG,
-                activebackground='#333', activeforeground=TPRI,
-                highlightthickness=0, bd=0, anchor='w')
-dropdown['menu'].config(bg=BG3, fg=TPRI, font=F_MED,
-                        activebackground=ACC_B, activeforeground=TPRI,
-                        bd=0, relief='flat')
+dropdown.config(
+    bg=BG3,
+    fg=TPRI,
+    relief='flat',
+    font=F_BIG,
+    activebackground='#333',
+    activeforeground=TPRI,
+    highlightthickness=0,
+    bd=0,
+    anchor='w',
+    indicatoron=1
+)
+dropdown['menu'].config(
+    bg=DD_BG,
+    fg=TPRI,
+    font=F_MED,
+    activebackground=DD_ACTIVE,
+    activeforeground=TPRI,
+    bd=1,
+    relief='solid'
+)
 dropdown.grid(row=0, column=0, sticky='ew', padx=2, pady=2)
 
-# 2. Typ klavesnice podla zakazky
-tk.Label(sidebar, text='Typ klavesnice podla zakazky', bg=BG2,
-         fg=TSEC, font=F_SML, anchor='w',
+tk.Label(sidebar, text='Typ klavesnice podla zakazky', bg=BG2, fg=TSEC, font=F_SML, anchor='w',
          padx=14, pady=10).grid(row=2, column=0, sticky='ew')
 
-order_kb_type_wrap = tk.Frame(sidebar, bg=BG3,
-                              highlightthickness=1, highlightbackground=BORDER)
+order_kb_type_wrap = tk.Frame(sidebar, bg=BG3, highlightthickness=1, highlightbackground=BORDER)
 order_kb_type_wrap.grid(row=3, column=0, sticky='ew', padx=14)
+
 order_kb_type_entry = tk.Entry(order_kb_type_wrap, textvariable=order_kb_type_var,
-                               bg=BG3, fg=TPRI, relief='flat',
-                               font=F_BIG, insertbackground=TPRI,
-                               bd=0)
+                               bg=BG3, fg=TPRI, relief='flat', font=F_BIG,
+                               insertbackground=TPRI, bd=0)
 order_kb_type_entry.pack(fill='x', padx=8, pady=6)
 
-# 3. Cislo zakazky
-tk.Label(sidebar, text='Cislo zakazky', bg=BG2,
-         fg=TSEC, font=F_SML, anchor='w',
+tk.Label(sidebar, text='Cislo zakazky', bg=BG2, fg=TSEC, font=F_SML, anchor='w',
          padx=14, pady=10).grid(row=4, column=0, sticky='ew')
 
-order_wrap = tk.Frame(sidebar, bg=BG3,
-                      highlightthickness=1, highlightbackground=BORDER)
+order_wrap = tk.Frame(sidebar, bg=BG3, highlightthickness=1, highlightbackground=BORDER)
 order_wrap.grid(row=5, column=0, sticky='ew', padx=14)
+
 order_entry = tk.Entry(order_wrap, textvariable=order_var,
-                       bg=BG3, fg=TPRI, relief='flat',
-                       font=F_BIG, insertbackground=TPRI,
-                       bd=0)
+                       bg=BG3, fg=TPRI, relief='flat', font=F_BIG,
+                       insertbackground=TPRI, bd=0)
 order_entry.pack(fill='x', padx=8, pady=6)
 
-# 4. Datum
-tk.Label(sidebar, text='Datum', bg=BG2,
-         fg=TSEC, font=F_SML, anchor='w',
+tk.Label(sidebar, text='Datum', bg=BG2, fg=TSEC, font=F_SML, anchor='w',
          padx=14, pady=10).grid(row=6, column=0, sticky='ew')
 
-date_wrap = tk.Frame(sidebar, bg=BG3,
-                     highlightthickness=1, highlightbackground=BORDER)
+date_wrap = tk.Frame(sidebar, bg=BG3, highlightthickness=1, highlightbackground=BORDER)
 date_wrap.grid(row=7, column=0, sticky='ew', padx=14)
+
 date_entry = tk.Entry(date_wrap, textvariable=date_var,
-                      bg=BG3, fg=TPRI, relief='flat',
-                      font=F_BIG, insertbackground=TPRI,
-                      bd=0)
+                      bg=BG3, fg=TPRI, relief='flat', font=F_BIG,
+                      insertbackground=TPRI, bd=0)
 date_entry.pack(fill='x', padx=8, pady=6)
 
 def do_print_label():
@@ -354,43 +358,36 @@ print_label_btn = tk.Button(sidebar, text='Tlac stitka', command=do_print_label,
                             activebackground=ACC_B, activeforeground=TPRI)
 print_label_btn.grid(row=8, column=0, sticky='ew', padx=14, pady=(8, 4))
 
-seq_info = tk.Label(sidebar, text='', bg=BG2, fg=TSEC,
-                    font=F_SML, anchor='w', padx=14, pady=8)
+seq_info = tk.Label(sidebar, text='', bg=BG2, fg=TSEC, font=F_SML, anchor='w', padx=14, pady=8)
 seq_info.grid(row=9, column=0, sticky='ew')
 
 tk.Frame(sidebar, bg=BORDER, height=1).grid(row=10, column=0, sticky='new')
 tk.Frame(sidebar, bg=BG2).grid(row=11, column=0, sticky='nsew')
 
-# LED sekcia
 tk.Frame(sidebar, bg=BORDER, height=1).grid(row=12, column=0, sticky='ew')
+
 led_sec = tk.Frame(sidebar, bg=BG2, padx=14, pady=10)
 led_sec.grid(row=13, column=0, sticky='ew')
 led_sec.columnconfigure(0, weight=1)
 led_sec.columnconfigure(1, weight=1)
 
-tk.Label(led_sec, text='LED', bg=BG2, fg=TSEC,
-         font=F_SML).grid(row=0, column=0, sticky='w', pady=4)
-tk.Label(led_sec, text='Hodnota', bg=BG2, fg=TDIM,
-         font=F_SML).grid(row=0, column=1, sticky='w', pady=4)
+tk.Label(led_sec, text='LED', bg=BG2, fg=TSEC, font=F_SML).grid(row=0, column=0, sticky='w', pady=4)
+tk.Label(led_sec, text='Hodnota', bg=BG2, fg=TDIM, font=F_SML).grid(row=0, column=1, sticky='w', pady=4)
 
 sidebar_val_lbls = {}
 for i, nm in enumerate(['NUM', 'CAPS', 'SCROLL', 'PAD']):
     def toggle(n=nm):
         new_state = not led_state[n]
         set_led(n, new_state)
-        sidebar_val_lbls[n].config(
-            text='ON' if new_state else '—',
-            fg=GBRI if new_state else TDIM)
+        sidebar_val_lbls[n].config(text='ON' if new_state else '—',
+                                   fg=GBRI if new_state else TDIM)
     tk.Button(led_sec, text=nm, command=toggle,
               bg=BG3, fg=TSEC, relief='flat', font=F_SML,
               padx=6, pady=3, cursor='hand2', bd=0,
-              activebackground='#333', activeforeground=TPRI
-              ).grid(row=i+1, column=0, sticky='ew', pady=2, padx=(0,4))
-    val_f = tk.Frame(led_sec, bg=BG3,
-                     highlightthickness=1, highlightbackground=BORDER)
+              activebackground='#333', activeforeground=TPRI).grid(row=i+1, column=0, sticky='ew', pady=2, padx=(0,4))
+    val_f = tk.Frame(led_sec, bg=BG3, highlightthickness=1, highlightbackground=BORDER)
     val_f.grid(row=i+1, column=1, sticky='ew', pady=2)
-    vl = tk.Label(val_f, text='—', bg=BG3, fg=TDIM,
-                  font=F_SML, anchor='center', pady=3)
+    vl = tk.Label(val_f, text='—', bg=BG3, fg=TDIM, font=F_SML, anchor='center', pady=3)
     vl.pack(fill='x')
     sidebar_val_lbls[nm] = vl
 
@@ -405,10 +402,8 @@ def bst(bg, fg=TPRI):
                 pady=8, cursor='hand2', bd=0,
                 activebackground=bg, activeforeground=fg)
 
-tk.Button(btn_bar, text='START', command=lambda: do_start(),
-          **bst(ACC_G)).grid(row=0, column=0, sticky='ew', padx=(0,4))
-tk.Button(btn_bar, text='Reset', command=lambda: do_reset(),
-          **bst(BG3, TSEC)).grid(row=0, column=1, sticky='ew')
+tk.Button(btn_bar, text='START', command=lambda: do_start(), **bst(ACC_G)).grid(row=0, column=0, sticky='ew', padx=(0,4))
+tk.Button(btn_bar, text='Reset', command=lambda: do_reset(), **bst(BG3, TSEC)).grid(row=0, column=1, sticky='ew')
 
 prog_lbl = tk.Label(sidebar, text='', bg=BG2, fg=TDIM, font=F_SML, pady=4)
 prog_lbl.grid(row=16, column=0)
@@ -425,10 +420,36 @@ status_lbl = tk.Label(sidebar, text='Vyber klavesnicu',
                       padx=14, pady=6, anchor='w', wraplength=190)
 status_lbl.grid(row=19, column=0, sticky='ew')
 
-# ── Logika ────────────────────────────────────────────────────────────────
+def force_redraw():
+    root.update_idletasks()
+    render_image(keyboards.get(kb_var.get(), {}).get('img'))
+    left.update_idletasks()
+    sidebar.update_idletasks()
+    img_canvas.update_idletasks()
+
+def apply_window_geometry():
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    root.geometry(f"{sw}x{sh-WINDOW_BOTTOM_MARGIN}+0+0")
+
+def toggle_kiosk(event=None):
+    current = bool(root.overrideredirect())
+    root.overrideredirect(not current)
+    apply_window_geometry()
+    root.after(100, force_redraw)
+    root.after(300, force_redraw)
+
+def end_kiosk(event=None):
+    root.overrideredirect(False)
+    apply_window_geometry()
+    root.after(100, force_redraw)
+
+root.bind('<F11>', toggle_kiosk)
+root.bind('<Escape>', end_kiosk)
+
 def on_kb_select(*_):
     name = kb_var.get()
-    kb   = keyboards.get(name)
+    kb = keyboards.get(name)
     if not kb:
         return
     do_reset()
@@ -436,10 +457,10 @@ def on_kb_select(*_):
     sequence = load_sequence(kb['txt'])
     n = len(sequence)
     seq_info.config(text=f'{n} klavesov', fg=BLUE if n else RED)
-    status_lbl.config(
-        text=f'Nacitane: {n} kl.' if n else 'TXT je prazdny!',
-        fg=AMBER if n else RED)
+    status_lbl.config(text=f'Nacitane: {n} kl.' if n else 'TXT je prazdny!',
+                      fg=AMBER if n else RED)
     root.after(50, lambda: render_image(kb.get('img')))
+    root.after(150, force_redraw)
 
 kb_var.trace_add('write', on_kb_select)
 
@@ -461,22 +482,24 @@ order_kb_type_entry.bind('<Return>', apply_order_kb_type)
 order_kb_type_entry.bind('<FocusOut>', apply_order_kb_type)
 
 def reload_kb():
-    global keyboards, order_kb_map
+    global keyboards, order_kb_map, kb_names
     keyboards = scan_keyboards()
     order_kb_map = load_order_kb_map(DB_PATH)
+    kb_names = sorted(keyboards.keys())
     menu = dropdown['menu']
     menu.delete(0, 'end')
-    for name in sorted(keyboards.keys()):
+    for name in kb_names:
         menu.add_command(label=name, command=tk._setit(kb_var, name))
     if not keyboards:
         menu.add_command(label='(prazdna)', command=lambda: None)
     status_lbl.config(text=f'{len(keyboards)} klavesnic', fg=GREEN)
+    root.after(100, force_redraw)
 
 btn_reload.config(command=reload_kb)
 
 def update_panels(clear=False):
     total = len(sequence)
-    cur   = idx[0]
+    cur = idx[0]
     if clear or total == 0:
         ordA.config(text=''); hexA.config(text='—', fg=TDIM); nameA.config(text='', fg=TDIM)
         ordB.config(text=''); hexB.config(text='—', fg=TDIM); nameB.config(text='', fg=TDIM)
@@ -485,8 +508,8 @@ def update_panels(clear=False):
     if cur == 0:
         ordA.config(text=''); hexA.config(text='—', fg=TDIM); nameA.config(text='', fg=TDIM)
     else:
-        ph  = sequence[cur-1]
-        pn  = VK_LABELS.get(ph, '')
+        ph = sequence[cur-1]
+        pn = VK_LABELS.get(ph, '')
         clr = GREEN if last_ok[0] else RED if last_ok[0] is False else TPRI
         ordA.config(text=f'#{cur}/{total}', fg=TSEC)
         hexA.config(text=ph, fg=clr)
@@ -515,9 +538,7 @@ def process_vk(vk_hex):
     else:
         gl = VK_LABELS.get(vk_hex.upper(), vk_hex)
         el = VK_LABELS.get(expected, expected)
-        result_lbl.config(
-            text=f'CHYBA  stlacene: {vk_hex.upper()} ({gl})   ocakavane: {expected} ({el})',
-            fg=RED)
+        result_lbl.config(text=f'CHYBA  stlacene: {vk_hex.upper()} ({gl})   ocakavane: {expected} ({el})', fg=RED)
     idx[0] += 1
     update_panels()
     if idx[0] >= len(sequence):
@@ -551,17 +572,13 @@ def do_start():
     if not sequence:
         status_lbl.config(text='Najprv vyber klavesnicu!', fg=RED)
         return
-
     idx[0] = 0
     running[0] = True
     last_ok[0] = None
     result_lbl.config(text='')
     order_txt = order_var.get().strip()
     order_part = f'zakazka {order_txt}' if order_txt else 'bez zakazky'
-    status_lbl.config(
-        text=f'Test bezi...  {kb_var.get()}  /  {order_part}',
-        fg=AMBER
-    )
+    status_lbl.config(text=f'Test bezi...  {kb_var.get()}  /  {order_part}', fg=AMBER)
     update_panels()
 
 def do_reset():
@@ -581,14 +598,15 @@ def on_close():
     root.destroy()
 
 root.protocol('WM_DELETE_WINDOW', on_close)
-
 update_panels(clear=True)
 
 if not keyboards:
     status_lbl.config(text=f'Keyboards nenajdena:\n{KB_DIR}', fg=RED)
 
-# Spusti pynput listener v separatnom vlakne
 t = threading.Thread(target=start_listener, daemon=True)
 t.start()
+
+root.after(200, force_redraw)
+root.after(600, force_redraw)
 
 root.mainloop()
