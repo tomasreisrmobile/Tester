@@ -1,144 +1,292 @@
+import re
 import sys
-from PyQt6.QtWidgets import QApplication, QWidget, QFileDialog
-from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont
+import time
+from pathlib import Path
+
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSpinBox,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+try:
+    import serial  # pyserial
+except Exception:
+    serial = None
 
 
-KEYS = [
-    ("ESC", 36, 28, 60, 60),
-    ("F1", 120, 28, 60, 60),
-    ("F2", 205, 28, 60, 60),
-    ("F3", 290, 28, 60, 60),
-    ("F4", 375, 28, 60, 60),
-    ("F5", 458, 28, 60, 60),
-    ("F6", 540, 30, 60, 60),
-    ("F7", 622, 30, 60, 60),
-    ("F8", 707, 31, 60, 60),
-    ("F9", 787, 31, 60, 60),
-    ("F10", 870, 31, 60, 60),
-    ("F11", 950, 32, 60, 60),
-    ("F12", 1035, 32, 60, 60),
-
-    ("1", 77, 104, 60, 60),
-    ("2", 162, 104, 60, 60),
-    ("3", 247, 104, 60, 60),
-    ("4", 332, 105, 60, 60),
-    ("5", 416, 105, 60, 60),
-    ("6", 497, 106, 60, 60),
-    ("7", 580, 106, 60, 60),
-    ("8", 661, 106, 60, 60),
-    ("9", 742, 107, 60, 60),
-    ("0", 827, 107, 60, 60),
-]
+def normalize_hex(value: str) -> str:
+    value = value.strip().lower()
+    if value.startswith("0x"):
+        value = value[2:]
+    return value.upper()
 
 
-class Tester(QWidget):
+def parse_mapping_line(line: str):
+    raw = line.strip()
+    if not raw or raw.startswith("#"):
+        return None
+
+    # Supports:
+    # 0x1B    [ Escape ]   1   1
+    # 0x70    F1           1   2
+    m = re.match(r"^\s*(0x[0-9a-fA-F]+|[0-9a-fA-F]+)\s+(.+?)\s+(\d+)\s+(\d+)\s*$", raw)
+    if not m:
+        return None
+
+    hex_code = normalize_hex(m.group(1))
+    key_name = m.group(2).strip()
+    card = int(m.group(3))
+    valve = int(m.group(4))
+    return hex_code, key_name, card, valve
+
+
+def load_mapping(path: Path):
+    mapping = {}
+    bad_lines = []
+    for idx, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        parsed = parse_mapping_line(line)
+        if parsed is None:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                bad_lines.append(idx)
+            continue
+        hex_code, key_name, card, valve = parsed
+        mapping[hex_code] = (key_name, card, valve)
+    return mapping, bad_lines
+
+
+def discover_profiles(profiles_dir: Path):
+    return sorted([p.stem for p in profiles_dir.glob("*.txt") if p.is_file()])
+
+
+class TesterWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-
-        self.setWindowTitle("Keyboard Tester")
-        self.setFixedSize(1200, 500)
+        self.setWindowTitle("Keyboard -> Arduino Tester")
+        self.setMinimumSize(760, 520)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        file, _ = QFileDialog.getOpenFileName(self, "Vyber obrázok klávesnice")
+        self.project_root = Path(__file__).resolve().parent
+        self.profiles_dir = self.project_root / "Keyboards"
+        self.state_file = self.project_root / ".selected_keyboard"
 
-        if not file:
-            sys.exit()
+        self.mapping = {}
+        self.serial_port = None
+        self.running = False
+        self.last_fire_at = 0.0
 
-        self.pixmap = QPixmap(file)
+        self.profile_combo = QComboBox()
+        self.port_edit = QLineEdit("/dev/ttyACM0")
+        self.baud_edit = QLineEdit("115200")
+        self.on_spin = QSpinBox()
+        self.on_spin.setRange(1, 20000)
+        self.on_spin.setValue(200)
+        self.off_spin = QSpinBox()
+        self.off_spin.setRange(1, 20000)
+        self.off_spin.setValue(200)
+        self.start_btn = QPushButton("Start")
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setEnabled(False)
+        self.status_label = QLabel("Status: Ready")
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
 
-        self.index = 0
-        self.results = []  # (index očakávaného klávesu, True/False)
-        self.test_finished = False
+        self._build_ui()
+        self._load_profiles()
+        self._wire()
 
-    def keyPressEvent(self, event):
-        if self.test_finished:
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+
+        form = QFormLayout()
+        form.addRow("Keyboard profile:", self.profile_combo)
+        form.addRow("Arduino USB port:", self.port_edit)
+        form.addRow("Baud:", self.baud_edit)
+        form.addRow("Valve ON (ms):", self.on_spin)
+        form.addRow("Pause OFF (ms):", self.off_spin)
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.start_btn)
+        buttons.addWidget(self.stop_btn)
+
+        layout = QVBoxLayout(central)
+        layout.addLayout(form)
+        layout.addLayout(buttons)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.log)
+
+    def _wire(self):
+        self.start_btn.clicked.connect(self.start_test)
+        self.stop_btn.clicked.connect(self.stop_test)
+        self.profile_combo.currentTextChanged.connect(self._store_selected_profile)
+
+    def _load_profiles(self):
+        self.profile_combo.clear()
+        profiles = discover_profiles(self.profiles_dir)
+        if not profiles:
+            self.log_line(f"No profiles found in: {self.profiles_dir}")
             return
 
-        key_map = {
-            Qt.Key.Key_Escape: "ESC",
-            Qt.Key.Key_F1: "F1",
-            Qt.Key.Key_F2: "F2",
-            Qt.Key.Key_F3: "F3",
-            Qt.Key.Key_F4: "F4",
-            Qt.Key.Key_F5: "F5",
-            Qt.Key.Key_F6: "F6",
-            Qt.Key.Key_F7: "F7",
-            Qt.Key.Key_F8: "F8",
-            Qt.Key.Key_F9: "F9",
-            Qt.Key.Key_F10: "F10",
-            Qt.Key.Key_F11: "F11",
-            Qt.Key.Key_F12: "F12",
-        }
+        self.profile_combo.addItems(profiles)
 
-        pressed = event.text().upper()
+        last = None
+        if self.state_file.exists():
+            last = self.state_file.read_text(encoding="utf-8").strip()
+        if last and last in profiles:
+            self.profile_combo.setCurrentText(last)
+        else:
+            self._store_selected_profile(self.profile_combo.currentText())
 
-        if pressed == "":
-            pressed = key_map.get(event.key(), None)
+    def _store_selected_profile(self, name: str):
+        if not name:
+            return
+        self.state_file.write_text(name + "\n", encoding="utf-8")
 
-        if not pressed:
+    def log_line(self, text: str):
+        self.log.append(text)
+        self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
+
+    def set_status(self, text: str):
+        self.status_label.setText(f"Status: {text}")
+
+    def _open_serial(self, port: str, baud: int):
+        if serial is None:
+            raise RuntimeError("Missing dependency: pyserial (pip install pyserial)")
+        ser = serial.Serial(port, baud, timeout=1)
+        time.sleep(2.0)  # Arduino reset after USB open.
+        ser.reset_input_buffer()
+        ser.reset_output_buffer()
+        return ser
+
+    def start_test(self):
+        if self.running:
             return
 
-        expected = KEYS[self.index][0]
+        profile_name = self.profile_combo.currentText().strip()
+        if not profile_name:
+            QMessageBox.warning(self, "Missing profile", "Vyber klavesnicu zo zoznamu.")
+            return
 
-        if pressed == expected:
-            self.results.append((self.index, True))
-            self.index += 1
-        else:
-            self.results.append((self.index, False))
+        map_path = self.profiles_dir / f"{profile_name}.txt"
+        if not map_path.exists():
+            QMessageBox.critical(self, "Missing mapping", f"Subor neexistuje:\n{map_path}")
+            return
 
-        if self.index == len(KEYS):
-            self.test_finished = True
+        mapping, bad_lines = load_mapping(map_path)
+        if not mapping:
+            QMessageBox.critical(self, "Invalid mapping", "V TXT neboli najdene validne riadky.")
+            return
 
-        self.update()
+        try:
+            port = self.port_edit.text().strip()
+            baud = int(self.baud_edit.text().strip())
+            ser = self._open_serial(port, baud)
+            ser.write(b"PING\n")
+            ser.flush()
+            pong = ser.readline().decode("utf-8", errors="replace").strip()
+        except Exception as exc:
+            QMessageBox.critical(self, "Arduino connection error", str(exc))
+            return
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
+        self.mapping = mapping
+        self.serial_port = ser
+        self.running = True
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.set_status(f"Running ({profile_name})")
 
-        painter.drawPixmap(self.rect(), self.pixmap)
+        self.log_line(f"Selected profile: {profile_name}")
+        self.log_line(f"Loaded mappings: {len(mapping)}")
+        if bad_lines:
+            self.log_line(f"Skipped malformed lines: {bad_lines}")
+        self.log_line(f"Arduino handshake: {pong if pong else '(no response)'}")
+        self.log_line("Test started. Press keys now.")
+        self.activateWindow()
+        self.setFocus()
 
-        for i, (key, x, y, w, h) in enumerate(KEYS):
+    def stop_test(self):
+        if not self.running:
+            return
+        try:
+            self.serial_port.write(b"RESET\n")
+            self.serial_port.flush()
+            _ = self.serial_port.readline()
+        except Exception:
+            pass
+        try:
+            self.serial_port.close()
+        except Exception:
+            pass
+        self.serial_port = None
+        self.mapping = {}
+        self.running = False
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.set_status("Stopped")
+        self.log_line("Test stopped.")
 
-            # default
-            color = QColor(0, 0, 255, 40)
+    def keyPressEvent(self, event: QKeyEvent):
+        super().keyPressEvent(event)
 
-            # aktuálny očakávaný kláves
-            if i == self.index and not self.test_finished:
-                color = QColor(255, 255, 0, 80)
+        if not self.running or self.serial_port is None:
+            return
 
-            # výsledky
-            for idx, ok in self.results:
-                if idx == i:
-                    if ok:
-                        color = QColor(0, 255, 0, 120)
-                    else:
-                        color = QColor(255, 0, 0, 120)
+        now = time.time()
+        if now - self.last_fire_at < 0.05:
+            return
 
-            painter.setBrush(color)
-            painter.drawRect(x, y, w, h)
+        vk = event.nativeVirtualKey()
+        if not isinstance(vk, int) or vk <= 0:
+            return
 
-        painter.setFont(QFont("Arial", 20))
+        vk_hex = normalize_hex(f"{vk:X}")
+        mapping = self.mapping.get(vk_hex)
+        if mapping is None:
+            self.log_line(f"No mapping for 0x{vk_hex}")
+            return
 
-        if not self.test_finished:
-            painter.setBrush(QColor(0, 0, 255, 120))
-            painter.drawRect(0, 450, 1200, 50)
-            painter.drawText(20, 485, f"TESTUJEM... ({self.index}/{len(KEYS)})")
+        key_name, card, valve = mapping
+        on_ms = self.on_spin.value()
+        off_ms = self.off_spin.value()
 
-        else:
-            ok_count = sum(1 for r in self.results if r[1])
-            fail_count = len(self.results) - ok_count
+        cmd = f"FIRE {card} {valve} {on_ms} {off_ms}\n"
+        try:
+            self.serial_port.write(cmd.encode("ascii"))
+            self.serial_port.flush()
+            response = self.serial_port.readline().decode("utf-8", errors="replace").strip()
+        except Exception as exc:
+            self.log_line(f"Serial error: {exc}")
+            self.stop_test()
+            return
 
-            if fail_count == 0:
-                painter.setBrush(QColor(0, 255, 0, 150))
-            else:
-                painter.setBrush(QColor(255, 0, 0, 150))
+        self.log_line(f"0x{vk_hex} {key_name} -> card {card}, valve {valve} | {response}")
+        self.last_fire_at = now
 
-            painter.drawRect(0, 450, 1200, 50)
-            painter.drawText(20, 485, f"OK: {ok_count}   FAIL: {fail_count}")
+    def closeEvent(self, event):
+        self.stop_test()
+        super().closeEvent(event)
+
+
+def main():
+    app = QApplication(sys.argv)
+    win = TesterWindow()
+    win.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    win = Tester()
-    win.show()
-    sys.exit(app.exec())
+    main()
